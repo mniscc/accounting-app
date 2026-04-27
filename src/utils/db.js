@@ -153,21 +153,14 @@ export async function exportAllData() {
 }
 
 export async function importAllData(data) {
-  if (data.gameRecords) {
-    for (const r of data.gameRecords) await gameStore.setItem(r.id, r)
-  }
-  if (data.persons) {
-    for (const r of data.persons) await personStore.setItem(r.id, r)
-  }
-  if (data.accounts) {
-    for (const r of data.accounts) await accountStore.setItem(r.id, r)
-  }
-  if (data.balanceRecords) {
-    for (const r of data.balanceRecords) await balanceStore.setItem(r.id, r)
-  }
-  if (data.config) {
-    for (const [k, v] of Object.entries(data.config)) await configStore.setItem(k, v)
-  }
+  // 并行写入加快速度（localforage 内部排队，但能避免每次 await 的额外往返延迟）
+  const tasks = []
+  if (data.gameRecords) for (const r of data.gameRecords) tasks.push(gameStore.setItem(r.id, r))
+  if (data.persons) for (const r of data.persons) tasks.push(personStore.setItem(r.id, r))
+  if (data.accounts) for (const r of data.accounts) tasks.push(accountStore.setItem(r.id, r))
+  if (data.balanceRecords) for (const r of data.balanceRecords) tasks.push(balanceStore.setItem(r.id, r))
+  if (data.config) for (const [k, v] of Object.entries(data.config)) tasks.push(configStore.setItem(k, v))
+  await Promise.all(tasks)
 }
 
 export async function clearAllData() {
@@ -452,30 +445,30 @@ export async function exportAllDataV2() {
 
 export async function importAllDataV2(data) {
   await importAllData(data)
-  // 1. 把已知 ledgers 写入
   const knownIds = new Set()
+  const ledgerTasks = []
   if (Array.isArray(data.ledgers)) {
     for (const r of data.ledgers) {
-      await ledgerStore.setItem(r.id, r)
+      ledgerTasks.push(ledgerStore.setItem(r.id, r))
       knownIds.add(r.id)
     }
   }
-  // 2. 收集所有"被引用"的 ledgerId（来自 records / ledgerCategories / config 的 cats_*）
+  await Promise.all(ledgerTasks)
+  // 收集被引用的 ledgerId
   const referencedIds = new Set()
-  for (const r of (data.records || [])) {
-    if (r.ledgerId) referencedIds.add(r.ledgerId)
-  }
+  for (const r of (data.records || [])) if (r.ledgerId) referencedIds.add(r.ledgerId)
   for (const k of Object.keys(data.ledgerCategories || {})) referencedIds.add(k)
   for (const k of Object.keys(data.config || {})) {
     if (k.startsWith('cats_')) referencedIds.add(k.slice(5))
   }
-  // 3. 自动恢复孤立 ledger 元数据
+  // 自动恢复孤立 ledger
   const recovered = []
+  const recoverTasks = []
   for (const lid of referencedIds) {
     if (knownIds.has(lid)) continue
     const existing = await ledgerStore.getItem(lid)
     if (existing) continue
-    await ledgerStore.setItem(lid, {
+    recoverTasks.push(ledgerStore.setItem(lid, {
       id: lid,
       name: lid === GAME_LEDGER_ID ? '游戏收支' : ('恢复账本_' + lid.slice(-6)),
       icon: 'balance-o',
@@ -484,18 +477,17 @@ export async function importAllDataV2(data) {
       hasPlatform: lid === GAME_LEDGER_ID,
       createdAt: Date.now(),
       autoRecovered: true,
-    })
+    }))
     recovered.push(lid)
   }
-  // 4. 写入记录和分类
-  if (Array.isArray(data.records)) {
-    for (const r of data.records) await recordStore.setItem(r.id, r)
-  }
+  await Promise.all(recoverTasks)
+  // 并行写入记录和分类
+  const tasks = []
+  if (Array.isArray(data.records)) for (const r of data.records) tasks.push(recordStore.setItem(r.id, r))
   if (data.ledgerCategories) {
-    for (const [k, v] of Object.entries(data.ledgerCategories)) {
-      await configStore.setItem('cats_' + k, v)
-    }
+    for (const [k, v] of Object.entries(data.ledgerCategories)) tasks.push(configStore.setItem('cats_' + k, v))
   }
+  await Promise.all(tasks)
   return { recovered }
 }
 

@@ -13,6 +13,10 @@ import * as XLSX from 'xlsx'
 
 const router = useRouter()
 
+const importFileInput = ref(null)
+const showPasteImport = ref(false)
+const pasteText = ref('')
+
 const gameTypes = ref([])
 const platforms = ref([])
 const ledgers = ref([])
@@ -167,72 +171,85 @@ async function handleExportExcel() {
   showToast('导出成功')
 }
 
-function handleImport() {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.json'
-  input.onchange = async (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-    try {
-      const text = await file.text()
-      const data = JSON.parse(text)
-      // 先做"预览"：告诉用户文件里到底有什么
-      const ledgers = data.ledgers || []
-      const records = data.records || []
-      const recordsByLedger = {}
-      for (const r of records) {
-        const lid = r.ledgerId || '(unknown)'
-        recordsByLedger[lid] = (recordsByLedger[lid] || 0) + 1
-      }
-      const ledgerLines = ledgers.length
-        ? ledgers.map((l) => `  • ${l.name}：${recordsByLedger[l.id] || 0} 条记录${data.ledgerCategories?.[l.id] ? '（含分类树）' : '（无分类）'}`).join('\n')
-        : '  （无）'
-      const orphanRecords = records.filter((r) => !ledgers.find((l) => l.id === r.ledgerId)).length
-      const previewMsg =
-        `JSON 内容预览（导入前）：\n\n` +
-        `账本：${ledgers.length}\n` +
-        `${ledgerLines}\n\n` +
-        `游戏记录(老)：${(data.gameRecords || []).length}\n` +
-        `账户：${(data.accounts || []).length}\n` +
-        (orphanRecords > 0 ? `⚠️ 孤立记录（找不到归属账本）：${orphanRecords}\n` : '') +
-        `\n继续导入？（不会删除现有数据，仅覆盖同 ID 项）`
-      console.log('[Import] 文件内容', {
-        ledgers, records: records.length, recordsByLedger,
-        ledgerCategories: data.ledgerCategories,
-      })
-      try {
-        await showConfirmDialog({
-          title: '导入预览',
-          message: previewMsg,
-          messageAlign: 'left',
-          confirmButtonText: '继续导入',
-          cancelButtonText: '取消',
-        })
-      } catch {
-        return  // 用户取消
-      }
-      showLoadingToast({ message: '导入中...', forbidClick: true })
-      const result = await importAllData(data)
-      closeToast()
-      const recoveredMsg = (result?.recovered?.length)
-        ? `\n\n⚙️ 自动恢复了 ${result.recovered.length} 个丢失的账本元数据：\n` +
-          result.recovered.map((id) => `  • ${id.slice(-8)}（默认名"恢复账本_..."，可去设置改名）`).join('\n')
-        : ''
-      showDialog({
-        title: '导入完成',
-        message: '点确认后会刷新页面以加载新数据。' + recoveredMsg,
-        messageAlign: 'left',
-      }).then(() => {
-        window.location.reload()
-      })
-    } catch (err) {
-      closeToast()
-      showToast('导入失败：' + (err?.message || '文件格式不正确'))
-      console.error('[Import] 失败', err)
-    }
+function triggerFileImport() {
+  importFileInput.value?.click()
+}
+
+async function onImportFileSelected(e) {
+  const file = e.target.files?.[0]
+  if (!file) return
+  try {
+    const text = await file.text()
+    await processImportText(text)
+  } catch (err) {
+    showToast('文件读取失败：' + (err?.message || ''))
+  } finally {
+    if (e.target) e.target.value = ''  // reset 让同一文件可重选
   }
-  input.click()
+}
+
+async function handlePasteImport() {
+  const text = pasteText.value.trim()
+  if (!text) { showToast('请粘贴 JSON 内容'); return }
+  try {
+    await processImportText(text)
+    showPasteImport.value = false
+    pasteText.value = ''
+  } catch (err) {
+    /* processImportText 内部会 toast */
+  }
+}
+
+async function processImportText(text) {
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    showToast('JSON 解析失败，文件格式不正确')
+    return
+  }
+  const ledgers = data.ledgers || []
+  const records = data.records || []
+  const recordsByLedger = {}
+  for (const r of records) {
+    const lid = r.ledgerId || '(unknown)'
+    recordsByLedger[lid] = (recordsByLedger[lid] || 0) + 1
+  }
+  const ledgerLines = ledgers.length
+    ? ledgers.map((l) => `  • ${l.name}：${recordsByLedger[l.id] || 0} 条记录${data.ledgerCategories?.[l.id] ? '（含分类树）' : '（无分类）'}`).join('\n')
+    : '  （无）'
+  const orphanRecords = records.filter((r) => !ledgers.find((l) => l.id === r.ledgerId)).length
+  const previewMsg =
+    `JSON 内容预览（导入前）：\n\n` +
+    `账本：${ledgers.length}\n` +
+    `${ledgerLines}\n\n` +
+    `游戏记录(老)：${(data.gameRecords || []).length}\n` +
+    `账户：${(data.accounts || []).length}\n` +
+    (orphanRecords > 0 ? `⚠️ 孤立记录（自动重建账本）：${orphanRecords}\n` : '') +
+    `\n继续导入？（不会删除现有数据，仅覆盖同 ID 项）`
+  console.log('[Import] 文件内容', { ledgers, records: records.length, recordsByLedger })
+  try {
+    await showConfirmDialog({
+      title: '导入预览',
+      message: previewMsg,
+      messageAlign: 'left',
+      confirmButtonText: '继续导入',
+      cancelButtonText: '取消',
+    })
+  } catch { return }
+  showLoadingToast({ message: '导入中（手机大数据可能稍慢）...', forbidClick: true })
+  const result = await importAllData(data)
+  closeToast()
+  const recoveredMsg = (result?.recovered?.length)
+    ? `\n\n⚙️ 自动恢复了 ${result.recovered.length} 个丢失的账本（请去"账本管理"改名）`
+    : ''
+  showDialog({
+    title: '导入完成',
+    message: '点确认后会刷新页面以加载新数据。' + recoveredMsg,
+    messageAlign: 'left',
+  }).then(() => {
+    window.location.reload()
+  })
 }
 
 async function handleClear() {
@@ -298,10 +315,38 @@ function formatDateForFile() {
     <van-cell-group inset title="数据管理" style="margin-top: 12px;">
       <van-cell title="导出 JSON 备份" is-link @click="handleExportJSON" />
       <van-cell title="导出 Excel" is-link @click="handleExportExcel" />
-      <van-cell title="导入 JSON 备份" is-link @click="handleImport" />
+      <van-cell title="导入 JSON 备份（选文件）" is-link @click="triggerFileImport" />
+      <input
+        ref="importFileInput"
+        type="file"
+        accept="application/json,.json,text/plain,*/*"
+        style="display:none"
+        @change="onImportFileSelected"
+      >
+      <van-cell title="导入 JSON 备份（粘贴文本）" is-link @click="showPasteImport = true" />
       <van-cell title="清空所有数据" is-link @click="handleClear" title-style="color: #ee0a24;" />
     </van-cell-group>
   </div>
+
+  <van-popup v-model:show="showPasteImport" position="bottom" round closeable :style="{ height: '70%' }">
+    <div style="padding: 20px;">
+      <div style="font-size: 16px; font-weight: bold; margin-bottom: 8px;">粘贴 JSON 备份</div>
+      <div style="font-size: 12px; color: #969799; margin-bottom: 12px;">
+        手机上文件选择不灵时用这个：把 JSON 内容复制到剪贴板，在下方文本框长按粘贴。
+      </div>
+      <van-field
+        v-model="pasteText"
+        type="textarea"
+        rows="10"
+        placeholder='这里粘贴 JSON 内容，以 { 开头'
+        style="background:#f7f8fa; border-radius:8px;"
+      />
+      <div style="margin-top: 12px; display: flex; gap: 8px;">
+        <van-button block plain @click="showPasteImport = false">取消</van-button>
+        <van-button block type="primary" @click="handlePasteImport">导入</van-button>
+      </div>
+    </div>
+  </van-popup>
 
   <van-dialog v-model:show="showAddLedger" title="新建账本" show-cancel-button @confirm="handleAddLedger">
     <van-field v-model="newLedgerName" placeholder="如：日常开支 / AI 基金" style="margin: 16px;" />
