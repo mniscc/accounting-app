@@ -177,31 +177,51 @@ function handleImport() {
     try {
       const text = await file.text()
       const data = JSON.parse(text)
-      showLoadingToast({ message: '导入中...', forbidClick: true })
-      // 调试输出
-      const counts = {
-        ledgers: (data.ledgers || []).length,
-        records: (data.records || []).length,
-        gameRecords: (data.gameRecords || []).length,
-        persons: (data.persons || []).length,
-        accounts: (data.accounts || []).length,
-        balanceRecords: (data.balanceRecords || []).length,
-        ledgerCategories: Object.keys(data.ledgerCategories || {}).length,
-        configKeys: Object.keys(data.config || {}).length,
+      // 先做"预览"：告诉用户文件里到底有什么
+      const ledgers = data.ledgers || []
+      const records = data.records || []
+      const recordsByLedger = {}
+      for (const r of records) {
+        const lid = r.ledgerId || '(unknown)'
+        recordsByLedger[lid] = (recordsByLedger[lid] || 0) + 1
       }
-      console.log('[Import] 导入内容统计：', counts)
-      await importAllData(data)
+      const ledgerLines = ledgers.length
+        ? ledgers.map((l) => `  • ${l.name}：${recordsByLedger[l.id] || 0} 条记录${data.ledgerCategories?.[l.id] ? '（含分类树）' : '（无分类）'}`).join('\n')
+        : '  （无）'
+      const orphanRecords = records.filter((r) => !ledgers.find((l) => l.id === r.ledgerId)).length
+      const previewMsg =
+        `JSON 内容预览（导入前）：\n\n` +
+        `账本：${ledgers.length}\n` +
+        `${ledgerLines}\n\n` +
+        `游戏记录(老)：${(data.gameRecords || []).length}\n` +
+        `账户：${(data.accounts || []).length}\n` +
+        (orphanRecords > 0 ? `⚠️ 孤立记录（找不到归属账本）：${orphanRecords}\n` : '') +
+        `\n继续导入？（不会删除现有数据，仅覆盖同 ID 项）`
+      console.log('[Import] 文件内容', {
+        ledgers, records: records.length, recordsByLedger,
+        ledgerCategories: data.ledgerCategories,
+      })
+      try {
+        await showConfirmDialog({
+          title: '导入预览',
+          message: previewMsg,
+          messageAlign: 'left',
+          confirmButtonText: '继续导入',
+          cancelButtonText: '取消',
+        })
+      } catch {
+        return  // 用户取消
+      }
+      showLoadingToast({ message: '导入中...', forbidClick: true })
+      const result = await importAllData(data)
       closeToast()
+      const recoveredMsg = (result?.recovered?.length)
+        ? `\n\n⚙️ 自动恢复了 ${result.recovered.length} 个丢失的账本元数据：\n` +
+          result.recovered.map((id) => `  • ${id.slice(-8)}（默认名"恢复账本_..."，可去设置改名）`).join('\n')
+        : ''
       showDialog({
         title: '导入完成',
-        message:
-          `账本：${counts.ledgers}\n` +
-          `账本记录：${counts.records}\n` +
-          `游戏记录(老)：${counts.gameRecords}\n` +
-          `账户：${counts.accounts}\n` +
-          `分类树：${counts.ledgerCategories}\n` +
-          `余额记录：${counts.balanceRecords}\n\n` +
-          `点确认后会刷新页面以加载新数据。`,
+        message: '点确认后会刷新页面以加载新数据。' + recoveredMsg,
         messageAlign: 'left',
       }).then(() => {
         window.location.reload()

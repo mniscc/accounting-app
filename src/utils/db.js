@@ -398,6 +398,38 @@ export async function initDefaultLedgers() {
     }
     await setConfig('game_categories_migrated', true)
   }
+  // 自愈：检测孤立分类（cats_X 没有对应 ledger）和孤立记录（record.ledgerId 找不到 ledger），重建丢失的 ledger 元数据
+  await healOrphanLedgers()
+}
+
+async function healOrphanLedgers() {
+  const knownIds = new Set()
+  await ledgerStore.iterate((v) => { knownIds.add(v.id) })
+  const referenced = new Set()
+  await configStore.iterate((v, k) => {
+    if (k && k.startsWith('cats_')) referenced.add(k.slice(5))
+  })
+  await recordStore.iterate((r) => {
+    if (r.ledgerId) referenced.add(r.ledgerId)
+  })
+  let fixed = 0
+  for (const lid of referenced) {
+    if (knownIds.has(lid)) continue
+    await ledgerStore.setItem(lid, {
+      id: lid,
+      name: lid === GAME_LEDGER_ID ? '游戏收支' : ('恢复账本_' + lid.slice(-6)),
+      icon: 'balance-o',
+      order: 99,
+      builtIn: lid === GAME_LEDGER_ID,
+      hasPlatform: lid === GAME_LEDGER_ID,
+      createdAt: Date.now(),
+      autoRecovered: true,
+    })
+    fixed++
+  }
+  if (fixed > 0) {
+    console.warn(`[Heal] 检测到 ${fixed} 个孤立账本元数据，已自动重建。可在设置里改名。`)
+  }
 }
 
 // ========== 扩展导出：含账本/分类/通用记录 ==========
@@ -420,9 +452,42 @@ export async function exportAllDataV2() {
 
 export async function importAllDataV2(data) {
   await importAllData(data)
+  // 1. 把已知 ledgers 写入
+  const knownIds = new Set()
   if (Array.isArray(data.ledgers)) {
-    for (const r of data.ledgers) await ledgerStore.setItem(r.id, r)
+    for (const r of data.ledgers) {
+      await ledgerStore.setItem(r.id, r)
+      knownIds.add(r.id)
+    }
   }
+  // 2. 收集所有"被引用"的 ledgerId（来自 records / ledgerCategories / config 的 cats_*）
+  const referencedIds = new Set()
+  for (const r of (data.records || [])) {
+    if (r.ledgerId) referencedIds.add(r.ledgerId)
+  }
+  for (const k of Object.keys(data.ledgerCategories || {})) referencedIds.add(k)
+  for (const k of Object.keys(data.config || {})) {
+    if (k.startsWith('cats_')) referencedIds.add(k.slice(5))
+  }
+  // 3. 自动恢复孤立 ledger 元数据
+  const recovered = []
+  for (const lid of referencedIds) {
+    if (knownIds.has(lid)) continue
+    const existing = await ledgerStore.getItem(lid)
+    if (existing) continue
+    await ledgerStore.setItem(lid, {
+      id: lid,
+      name: lid === GAME_LEDGER_ID ? '游戏收支' : ('恢复账本_' + lid.slice(-6)),
+      icon: 'balance-o',
+      order: 99,
+      builtIn: lid === GAME_LEDGER_ID,
+      hasPlatform: lid === GAME_LEDGER_ID,
+      createdAt: Date.now(),
+      autoRecovered: true,
+    })
+    recovered.push(lid)
+  }
+  // 4. 写入记录和分类
   if (Array.isArray(data.records)) {
     for (const r of data.records) await recordStore.setItem(r.id, r)
   }
@@ -431,6 +496,7 @@ export async function importAllDataV2(data) {
       await configStore.setItem('cats_' + k, v)
     }
   }
+  return { recovered }
 }
 
 const _origClearAllData = clearAllData
