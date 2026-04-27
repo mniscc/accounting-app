@@ -5,6 +5,8 @@ const personStore = localforage.createInstance({ name: 'accounting', storeName: 
 const accountStore = localforage.createInstance({ name: 'accounting', storeName: 'accounts' })
 const balanceStore = localforage.createInstance({ name: 'accounting', storeName: 'balance_records' })
 const configStore = localforage.createInstance({ name: 'accounting', storeName: 'config' })
+const ledgerStore = localforage.createInstance({ name: 'accounting', storeName: 'ledgers' })
+const recordStore = localforage.createInstance({ name: 'accounting', storeName: 'records' })
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
@@ -214,4 +216,227 @@ export async function initDefaultPersons() {
     await addPerson('父亲')
     await addPerson('母亲')
   }
+}
+
+// ========== 账本（多账本支持） ==========
+
+const GAME_LEDGER_ID = 'L_GAME'
+
+const DEFAULT_LEDGERS = [
+  { id: GAME_LEDGER_ID, name: '游戏收支', icon: 'balance-o', builtIn: true, hasPlatform: true },
+]
+
+const DEFAULT_CATEGORIES = {
+  // 通用账本默认结构 —— 空白，由用户自行添加
+  generic: {
+    income: [],
+    expense: [],
+  },
+}
+
+// 根据游戏类型 + 平台 动态生成游戏账本默认分类（texas 含平台二级，lot 无）
+function buildGameCategories(gameTypes, platforms) {
+  const types = (gameTypes && gameTypes.length) ? gameTypes : ['texas', 'lot']
+  const plats = platforms || []
+  const buildSide = () => types.map((t) => {
+    const subs = (t.toLowerCase() === 'texas') ? plats.map((p, i) => ({ id: `g_${t}_${i}_${p}`, name: p })) : []
+    return { id: `g_${t}`, name: t, sub: subs }
+  })
+  return { income: buildSide(), expense: buildSide() }
+}
+
+export async function getLedgers() {
+  const all = []
+  await ledgerStore.iterate((v) => { all.push(v) })
+  return all.sort((a, b) => (a.order || 0) - (b.order || 0))
+}
+
+export async function getLedger(id) {
+  return ledgerStore.getItem(id)
+}
+
+export async function addLedger(name, options = {}) {
+  const id = options.id || ('L_' + genId())
+  const ledgers = await getLedgers()
+  const data = {
+    id, name,
+    icon: options.icon || 'balance-o',
+    order: ledgers.length,
+    builtIn: options.builtIn === true,
+    hasPlatform: options.hasPlatform === true,
+    createdAt: Date.now(),
+  }
+  await ledgerStore.setItem(id, data)
+  // 初始化默认分类
+  const cat = options.categories || DEFAULT_CATEGORIES.generic
+  await setCategories(id, cat)
+  return data
+}
+
+export async function updateLedger(id, updates) {
+  const l = await ledgerStore.getItem(id)
+  if (!l) return null
+  const updated = { ...l, ...updates, updatedAt: Date.now() }
+  await ledgerStore.setItem(id, updated)
+  return updated
+}
+
+export async function deleteLedger(id) {
+  // 删除账本及其所有记录、分类
+  await ledgerStore.removeItem(id)
+  await configStore.removeItem('cats_' + id)
+  // 删该账本下记录
+  const ids = []
+  await recordStore.iterate((r) => { if (r.ledgerId === id) ids.push(r.id) })
+  for (const rid of ids) await recordStore.removeItem(rid)
+}
+
+// ========== 分类（按账本存）==========
+
+export async function getCategories(ledgerId) {
+  const stored = await configStore.getItem('cats_' + ledgerId)
+  if (stored) return stored
+  // 游戏账本的默认分类来自当前的"游戏类型 + 平台"列表
+  if (ledgerId === GAME_LEDGER_ID) {
+    const types = await getGameTypes()
+    const plats = await getPlatforms()
+    return buildGameCategories(types, plats)
+  }
+  const def = DEFAULT_CATEGORIES[ledgerId] || DEFAULT_CATEGORIES.generic
+  return JSON.parse(JSON.stringify(def))
+}
+
+export async function setCategories(ledgerId, tree) {
+  // 序列化为普通对象，避免 Vue 响应式代理被存进 IndexedDB 失败
+  const plain = JSON.parse(JSON.stringify(tree))
+  await configStore.setItem('cats_' + ledgerId, plain)
+}
+
+// ========== 通用记录（账本内）==========
+
+export async function getRecordsByLedger(ledgerId) {
+  const list = []
+  await recordStore.iterate((r) => { if (r.ledgerId === ledgerId) list.push(r) })
+  return list.sort((a, b) => b.createdAt - a.createdAt)
+}
+
+export async function addRecord(record) {
+  const id = genId()
+  const data = { id, createdAt: Date.now(), ...record }
+  await recordStore.setItem(id, data)
+  return data
+}
+
+export async function updateRecord(id, updates) {
+  const r = await recordStore.getItem(id)
+  if (!r) return null
+  const updated = { ...r, ...updates, updatedAt: Date.now() }
+  await recordStore.setItem(id, updated)
+  return updated
+}
+
+export async function deleteRecord(id) {
+  await recordStore.removeItem(id)
+}
+
+// ========== 当前选中账本 ==========
+
+export async function getCurrentLedgerId() {
+  return getConfig('currentLedgerId', GAME_LEDGER_ID)
+}
+
+export async function setCurrentLedgerId(id) {
+  return setConfig('currentLedgerId', id)
+}
+
+// ========== 初始化默认账本 + 迁移老游戏记录 ==========
+
+export async function initDefaultLedgers() {
+  const ledgers = await getLedgers()
+  if (ledgers.length === 0) {
+    for (const def of DEFAULT_LEDGERS) {
+      if (def.id === GAME_LEDGER_ID) {
+        const types = await getGameTypes()
+        const plats = await getPlatforms()
+        await addLedger(def.name, { ...def, categories: buildGameCategories(types, plats) })
+      } else {
+        await addLedger(def.name, def)
+      }
+    }
+  }
+  // 迁移：把旧 gameStore 里的记录转到 recordStore
+  const migrated = await getConfig('legacy_game_migrated', false)
+  if (!migrated) {
+    await gameStore.iterate((r) => {
+      const direction = (r.amount || 0) >= 0 ? 'income' : 'expense'
+      recordStore.setItem(r.id, {
+        id: r.id,
+        ledgerId: GAME_LEDGER_ID,
+        direction,
+        category1: '',
+        category1Name: r.type || '',
+        category2: '',
+        category2Name: r.platform || '',
+        amount: Math.abs(r.amount || 0),
+        note: r.note || '',
+        platform: r.platform || '',
+        legacyType: r.type || '',
+        createdAt: r.createdAt || Date.now(),
+      })
+    })
+    await setConfig('legacy_game_migrated', true)
+  }
+  // 迁移：把"游戏类型 + 平台"配置塞进游戏账本的分类树（如果分类为空）
+  const gameMigrated = await getConfig('game_categories_migrated', false)
+  if (!gameMigrated) {
+    const stored = await configStore.getItem('cats_' + GAME_LEDGER_ID)
+    const empty = !stored || ((stored.income?.length || 0) === 0 && (stored.expense?.length || 0) === 0)
+    if (empty) {
+      const types = await getGameTypes()
+      const plats = await getPlatforms()
+      await setCategories(GAME_LEDGER_ID, buildGameCategories(types, plats))
+    }
+    await setConfig('game_categories_migrated', true)
+  }
+}
+
+// ========== 扩展导出：含账本/分类/通用记录 ==========
+
+const _origExportAllData = exportAllData
+
+export async function exportAllDataV2() {
+  const data = await _origExportAllData()
+  data.ledgers = []
+  data.records = []
+  data.ledgerCategories = {}
+  await ledgerStore.iterate((v) => data.ledgers.push(v))
+  await recordStore.iterate((v) => data.records.push(v))
+  for (const l of data.ledgers) {
+    const c = await configStore.getItem('cats_' + l.id)
+    if (c) data.ledgerCategories[l.id] = c
+  }
+  return data
+}
+
+export async function importAllDataV2(data) {
+  await importAllData(data)
+  if (Array.isArray(data.ledgers)) {
+    for (const r of data.ledgers) await ledgerStore.setItem(r.id, r)
+  }
+  if (Array.isArray(data.records)) {
+    for (const r of data.records) await recordStore.setItem(r.id, r)
+  }
+  if (data.ledgerCategories) {
+    for (const [k, v] of Object.entries(data.ledgerCategories)) {
+      await configStore.setItem('cats_' + k, v)
+    }
+  }
+}
+
+const _origClearAllData = clearAllData
+
+export async function clearAllDataV2() {
+  await _origClearAllData()
+  await ledgerStore.clear()
+  await recordStore.clear()
 }

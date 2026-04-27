@@ -1,20 +1,68 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { exportAllData, importAllData, clearAllData, getGameTypes, setGameTypes, getPlatforms, setPlatforms } from '../utils/db'
+import { useRouter } from 'vue-router'
+import {
+  exportAllDataV2 as exportAllData,
+  importAllDataV2 as importAllData,
+  clearAllDataV2 as clearAllData,
+  getGameTypes, setGameTypes, getPlatforms, setPlatforms,
+  getLedgers, addLedger, updateLedger, deleteLedger,
+} from '../utils/db'
 import { showConfirmDialog, showDialog, showToast, showLoadingToast, closeToast } from 'vant'
 import * as XLSX from 'xlsx'
 
+const router = useRouter()
+
 const gameTypes = ref([])
 const platforms = ref([])
+const ledgers = ref([])
 const showAddType = ref(false)
 const showAddPlatform = ref(false)
+const showAddLedger = ref(false)
 const newTypeName = ref('')
 const newPlatformName = ref('')
+const newLedgerName = ref('')
 
 onMounted(async () => {
   gameTypes.value = await getGameTypes()
   platforms.value = await getPlatforms()
+  ledgers.value = await getLedgers()
 })
+
+// ========== 账本管理 ==========
+async function handleAddLedger() {
+  const name = newLedgerName.value.trim()
+  if (!name) { showToast('请输入账本名称'); return }
+  if (ledgers.value.some((l) => l.name === name)) { showToast('已存在同名账本'); return }
+  await addLedger(name)
+  newLedgerName.value = ''
+  showAddLedger.value = false
+  ledgers.value = await getLedgers()
+  showToast('账本已添加')
+}
+
+async function handleRenameLedger(l) {
+  const name = window.prompt('修改账本名称', l.name)
+  if (!name || !name.trim() || name.trim() === l.name) return
+  await updateLedger(l.id, { name: name.trim() })
+  ledgers.value = await getLedgers()
+}
+
+async function handleDeleteLedger(l) {
+  try {
+    await showConfirmDialog({
+      title: '确认删除账本',
+      message: `删除"${l.name}"会一并清空它的所有记录和分类。不可恢复。`,
+    })
+    await deleteLedger(l.id)
+    ledgers.value = await getLedgers()
+    showToast('已删除')
+  } catch {}
+}
+
+function openCategoryEdit(l) {
+  router.push(`/settings/categories/${l.id}`)
+}
 
 // ========== 游戏类型管理 ==========
 async function handleAddType() {
@@ -66,7 +114,29 @@ async function handleExportExcel() {
   const data = await exportAllData()
   const wb = XLSX.utils.book_new()
 
-  if (data.gameRecords.length) {
+  // 多账本记录：按账本分 sheet
+  const ledgerById = {}
+  for (const l of (data.ledgers || [])) ledgerById[l.id] = l
+  const grouped = {}
+  for (const r of (data.records || [])) {
+    const lname = ledgerById[r.ledgerId]?.name || r.ledgerId
+    if (!grouped[lname]) grouped[lname] = []
+    grouped[lname].push({
+      日期: new Date(r.createdAt).toLocaleString('zh-CN'),
+      方向: r.direction === 'income' ? '收入' : '支出',
+      一级分类: r.category1Name || r.legacyType || '',
+      二级分类: r.category2Name || '',
+      平台: r.platform || '',
+      金额: r.amount,
+      备注: r.note || '',
+    })
+  }
+  for (const [name, rows] of Object.entries(grouped)) {
+    const ws = XLSX.utils.json_to_sheet(rows)
+    XLSX.utils.book_append_sheet(wb, ws, name.slice(0, 31))
+  }
+  // 兼容老 gameRecords（如果迁移漏了）
+  if (data.gameRecords?.length && !grouped['游戏收支']) {
     const rows = data.gameRecords.map((r) => ({
       日期: new Date(r.createdAt).toLocaleString('zh-CN'),
       类型: r.type,
@@ -75,7 +145,7 @@ async function handleExportExcel() {
       备注: r.note || '',
     }))
     const ws = XLSX.utils.json_to_sheet(rows)
-    XLSX.utils.book_append_sheet(wb, ws, '游戏收支')
+    XLSX.utils.book_append_sheet(wb, ws, '游戏收支(旧)')
   }
 
   if (data.accounts.length) {
@@ -153,27 +223,29 @@ function formatDateForFile() {
       <div style="font-size: 13px; color: #969799;">数据存储在本地，注意定期备份</div>
     </div>
 
-    <!-- 游戏类型管理 -->
-    <van-cell-group inset title="游戏类型">
-      <van-swipe-cell v-for="(type, index) in gameTypes" :key="type">
-        <van-cell :title="type" />
-        <template #right>
-          <van-button square type="danger" text="删除" style="height: 100%;" @click="handleDeleteType(index)" />
-        </template>
-      </van-swipe-cell>
-      <van-cell title="添加类型" is-link @click="showAddType = true" />
+    <!-- 账本管理 -->
+    <van-cell-group inset title="账本管理">
+      <div v-for="l in ledgers" :key="l.id" class="ledger-row">
+        <div class="ledger-row-main">
+          <van-icon :name="l.icon || 'balance-o'" size="18" />
+          <span class="ledger-row-name">{{ l.name }}</span>
+          <van-tag v-if="l.builtIn" size="small" plain>内置</van-tag>
+        </div>
+        <div class="ledger-row-actions">
+          <van-button size="mini" plain @click="openCategoryEdit(l)">分类</van-button>
+          <van-button size="mini" plain @click="handleRenameLedger(l)">改名</van-button>
+          <van-button size="mini" plain type="danger" :disabled="l.builtIn" @click="handleDeleteLedger(l)">删除</van-button>
+        </div>
+      </div>
+      <van-cell title="添加账本" is-link @click="showAddLedger = true" />
     </van-cell-group>
 
-    <!-- 德州平台管理 -->
-    <van-cell-group inset title="德州扑克平台" style="margin-top: 12px;">
-      <van-swipe-cell v-for="(p, index) in platforms" :key="p">
-        <van-cell :title="p" />
-        <template #right>
-          <van-button square type="danger" text="删除" style="height: 100%;" @click="handleDeletePlatform(index)" />
-        </template>
-      </van-swipe-cell>
-      <van-cell title="添加平台" is-link @click="showAddPlatform = true" />
-    </van-cell-group>
+    <!-- 提示：游戏类型/平台已并入"游戏收支"账本的分类树 -->
+    <van-notice-bar wrapable :scrollable="false" left-icon="info-o" style="margin-top: 12px;">
+      游戏类型与平台已合并到"游戏收支"账本的分类。
+      点上方账本管理里 <strong>游戏收支</strong> 行的"分类"按钮编辑：
+      texas / lot 是一级分类，texas 下的子项是平台。
+    </van-notice-bar>
 
     <!-- 数据管理 -->
     <van-cell-group inset title="数据管理" style="margin-top: 12px;">
@@ -184,11 +256,21 @@ function formatDateForFile() {
     </van-cell-group>
   </div>
 
-  <van-dialog v-model:show="showAddType" title="添加游戏类型" show-cancel-button @confirm="handleAddType">
-    <van-field v-model="newTypeName" placeholder="请输入类型名称" style="margin: 16px;" />
-  </van-dialog>
-
-  <van-dialog v-model:show="showAddPlatform" title="添加平台" show-cancel-button @confirm="handleAddPlatform">
-    <van-field v-model="newPlatformName" placeholder="请输入平台名称" style="margin: 16px;" />
+  <van-dialog v-model:show="showAddLedger" title="新建账本" show-cancel-button @confirm="handleAddLedger">
+    <van-field v-model="newLedgerName" placeholder="如：日常开支 / AI 基金" style="margin: 16px;" />
+    <div style="margin: 0 16px 16px; font-size: 12px; color: #969799;">
+      新建后会自动初始化默认收入/支出分类，可点"分类"按钮自定义。
+    </div>
   </van-dialog>
 </template>
+
+<style scoped>
+.ledger-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 16px; border-bottom: 1px solid #ebedf0;
+}
+.ledger-row:last-of-type { border-bottom: none; }
+.ledger-row-main { display: flex; align-items: center; gap: 8px; }
+.ledger-row-name { font-size: 15px; }
+.ledger-row-actions { display: flex; gap: 4px; }
+</style>

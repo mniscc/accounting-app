@@ -1,11 +1,13 @@
 <script setup>
 import { ref, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { getGameRecords } from '../utils/db'
+import { getRecordsByLedger, getCurrentLedgerId, getLedger } from '../utils/db'
 import { formatAmount } from '../utils/format'
 import * as echarts from 'echarts'
 
 const router = useRouter()
+const ledgerId = ref('')
+const ledger = ref(null)
 const allRecords = ref([])
 const period = ref('all')
 const selectedYear = ref(new Date().getFullYear())
@@ -15,21 +17,32 @@ const pieChartRef = ref(null)
 const platformChartRef = ref(null)
 
 onMounted(async () => {
-  allRecords.value = await getGameRecords()
+  ledgerId.value = await getCurrentLedgerId()
+  ledger.value = await getLedger(ledgerId.value)
+  allRecords.value = await getRecordsByLedger(ledgerId.value)
   await nextTick()
   renderCharts()
 })
 
+// 给每条记录算一个带符号的"金额"用于分析
+function signedAmount(r) {
+  const sign = r.direction === 'income' ? 1 : -1
+  return sign * (r.amount || 0)
+}
+
+// 兼容字段：把当前记录映射到统计用的 type/platform
+function recType(r) { return r.category1Name || r.legacyType || '未分类' }
+function recPlatform(r) { return r.category2Name || r.platform || '' }
+
 // 可选年份列表
 const availableYears = computed(() => {
   const years = new Set(allRecords.value.map((r) => new Date(r.createdAt).getFullYear()))
+  if (years.size === 0) years.add(new Date().getFullYear())
   return [...years].sort((a, b) => b - a)
 })
 
-// 月份列表
 const months = [1,2,3,4,5,6,7,8,9,10,11,12]
 
-// 根据筛选条件过滤记录
 const records = computed(() => {
   if (period.value === 'all') return allRecords.value
   return allRecords.value.filter((r) => {
@@ -40,9 +53,9 @@ const records = computed(() => {
   })
 })
 
-const totalProfit = computed(() => records.value.reduce((sum, r) => sum + r.amount, 0))
-const totalWin = computed(() => records.value.filter((r) => r.amount > 0).reduce((sum, r) => sum + r.amount, 0))
-const totalLose = computed(() => records.value.filter((r) => r.amount < 0).reduce((sum, r) => sum + r.amount, 0))
+const totalProfit = computed(() => records.value.reduce((sum, r) => sum + signedAmount(r), 0))
+const totalIn = computed(() => records.value.filter((r) => r.direction === 'income').reduce((s, r) => s + (r.amount || 0), 0))
+const totalOut = computed(() => records.value.filter((r) => r.direction === 'expense').reduce((s, r) => s + (r.amount || 0), 0))
 const totalCount = computed(() => records.value.length)
 
 watch([period, selectedYear, selectedMonth], async () => {
@@ -53,10 +66,12 @@ watch([period, selectedYear, selectedMonth], async () => {
 const statsByType = computed(() => {
   const map = {}
   for (const r of records.value) {
-    if (!map[r.type]) map[r.type] = { win: 0, lose: 0, count: 0 }
-    map[r.type].count++
-    if (r.amount >= 0) map[r.type].win += r.amount
-    else map[r.type].lose += r.amount
+    const t = recType(r)
+    if (!map[t]) map[t] = { win: 0, lose: 0, count: 0 }
+    map[t].count++
+    const amt = signedAmount(r)
+    if (amt >= 0) map[t].win += amt
+    else map[t].lose += amt
   }
   return Object.entries(map).map(([type, data]) => ({
     type, ...data, total: data.win + data.lose,
@@ -66,27 +81,17 @@ const statsByType = computed(() => {
 const statsByPlatform = computed(() => {
   const map = {}
   for (const r of records.value) {
-    if (!r.platform) continue
-    if (!map[r.platform]) map[r.platform] = { win: 0, lose: 0, count: 0 }
-    map[r.platform].count++
-    if (r.amount >= 0) map[r.platform].win += r.amount
-    else map[r.platform].lose += r.amount
+    const p = recPlatform(r)
+    if (!p) continue
+    if (!map[p]) map[p] = { win: 0, lose: 0, count: 0 }
+    map[p].count++
+    const amt = signedAmount(r)
+    if (amt >= 0) map[p].win += amt
+    else map[p].lose += amt
   }
   return Object.entries(map).map(([platform, data]) => ({
     platform, ...data, total: data.win + data.lose,
   }))
-})
-
-// 按月汇总（年度视图时展示）
-const monthlyStats = computed(() => {
-  if (period.value !== 'year') return []
-  const map = {}
-  for (const r of records.value) {
-    const m = new Date(r.createdAt).getMonth() + 1
-    if (!map[m]) map[m] = 0
-    map[m] += r.amount
-  }
-  return months.map((m) => ({ month: m, total: map[m] || 0 })).filter((m) => map[m.month] !== undefined)
 })
 
 function renderCharts() {
@@ -100,13 +105,12 @@ function renderTrendChart() {
   const chart = echarts.init(chartRef.value)
   if (records.value.length === 0) { chart.clear(); return }
 
-  // 年度视图：按月柱状图
   if (period.value === 'year') {
     const monthMap = {}
     for (const r of records.value) {
       const m = new Date(r.createdAt).getMonth() + 1
       if (!monthMap[m]) monthMap[m] = 0
-      monthMap[m] += r.amount
+      monthMap[m] += signedAmount(r)
     }
     chart.setOption({
       grid: { left: 60, right: 20, top: 20, bottom: 30 },
@@ -123,11 +127,10 @@ function renderTrendChart() {
     return
   }
 
-  // 其他视图：累计走势线
   const sorted = [...records.value].sort((a, b) => a.createdAt - b.createdAt)
   let cumulative = 0
   const data = sorted.map((r) => {
-    cumulative += r.amount
+    cumulative += signedAmount(r)
     const d = new Date(r.createdAt)
     return [`${d.getMonth() + 1}/${d.getDate()}`, cumulative]
   })
@@ -152,8 +155,9 @@ function renderPieChart() {
   if (records.value.length === 0) { chart.clear(); return }
   const map = {}
   for (const r of records.value) {
-    if (!map[r.type]) map[r.type] = 0
-    map[r.type] += Math.abs(r.amount)
+    const t = recType(r)
+    if (!map[t]) map[t] = 0
+    map[t] += Math.abs(signedAmount(r))
   }
   const data = Object.entries(map).map(([name, value]) => ({ name, value }))
   chart.setOption({
@@ -182,7 +186,7 @@ function renderPlatformChart() {
 </script>
 
 <template>
-  <van-nav-bar title="统计分析" left-text="返回" left-arrow @click-left="router.back()" />
+  <van-nav-bar :title="`统计 · ${ledger?.name || ''}`" left-text="返回" left-arrow @click-left="router.back()" />
   <div class="page-container">
     <!-- 时间筛选 -->
     <div class="section-card filter-bar">
@@ -201,7 +205,6 @@ function renderPlatformChart() {
       </div>
     </div>
 
-    <!-- 汇总数据 -->
     <div class="section-card summary-card">
       <div class="summary-row">
         <div class="summary-item">
@@ -211,13 +214,13 @@ function renderPlatformChart() {
           </div>
         </div>
         <div class="summary-item">
-          <div class="summary-label">场次</div>
+          <div class="summary-label">条数</div>
           <div style="font-size: 22px; font-weight: bold;">{{ totalCount }}</div>
         </div>
       </div>
       <div class="summary-row" style="margin-top: 8px;">
-        <span class="amount-positive" style="font-size: 14px;">收入 +{{ formatAmount(totalWin) }}</span>
-        <span class="amount-negative" style="font-size: 14px;">支出 {{ formatAmount(totalLose) }}</span>
+        <span class="amount-positive" style="font-size: 14px;">收入 +{{ formatAmount(totalIn) }}</span>
+        <span class="amount-negative" style="font-size: 14px;">支出 -{{ formatAmount(totalOut) }}</span>
       </div>
     </div>
 
@@ -229,20 +232,20 @@ function renderPlatformChart() {
       </div>
 
       <div class="section-card">
-        <div class="chart-title">各类游戏占比</div>
+        <div class="chart-title">一级分类占比</div>
         <div ref="pieChartRef" style="width: 100%; height: 240px;"></div>
       </div>
 
       <div v-if="statsByPlatform.length > 0" class="section-card">
-        <div class="chart-title">平台盈亏对比</div>
+        <div class="chart-title">二级分类盈亏对比</div>
         <div ref="platformChartRef" style="width: 100%; height: 240px;"></div>
       </div>
 
       <div class="section-card">
-        <div class="chart-title">分类统计</div>
+        <div class="chart-title">一级分类统计</div>
         <div v-for="stat in statsByType" :key="stat.type" class="stat-row">
           <span class="stat-label">{{ stat.type }}</span>
-          <span class="stat-count">{{ stat.count }}次</span>
+          <span class="stat-count">{{ stat.count }}条</span>
           <span :class="stat.total >= 0 ? 'amount-positive' : 'amount-negative'" style="font-weight: bold;">
             {{ stat.total >= 0 ? '+' : '' }}{{ formatAmount(stat.total) }}
           </span>
@@ -250,10 +253,10 @@ function renderPlatformChart() {
       </div>
 
       <div v-if="statsByPlatform.length > 0" class="section-card">
-        <div class="chart-title">平台统计</div>
+        <div class="chart-title">二级分类统计</div>
         <div v-for="stat in statsByPlatform" :key="stat.platform" class="stat-row">
           <span class="stat-label">{{ stat.platform }}</span>
-          <span class="stat-count">{{ stat.count }}次</span>
+          <span class="stat-count">{{ stat.count }}条</span>
           <span :class="stat.total >= 0 ? 'amount-positive' : 'amount-negative'" style="font-weight: bold;">
             {{ stat.total >= 0 ? '+' : '' }}{{ formatAmount(stat.total) }}
           </span>

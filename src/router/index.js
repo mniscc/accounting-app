@@ -21,6 +21,11 @@ const routes = [
     component: () => import('../views/GameStats.vue'),
   },
   {
+    path: '/game/report',
+    name: 'LedgerReport',
+    component: () => import('../views/LedgerReport.vue'),
+  },
+  {
     path: '/assets',
     name: 'Assets',
     component: () => import('../views/AssetOverview.vue'),
@@ -44,6 +49,11 @@ const routes = [
     path: '/settings',
     name: 'Settings',
     component: () => import('../views/Settings.vue'),
+  },
+  {
+    path: '/settings/categories/:ledgerId',
+    name: 'CategoryEdit',
+    component: () => import('../views/CategoryEdit.vue'),
   },
 ]
 
