@@ -1,4 +1,4 @@
-const CACHE_NAME = 'accounting-v1'
+const CACHE_NAME = 'accounting-v2-multi-ledger'
 
 // 安装时缓存核心资源
 self.addEventListener('install', (event) => {

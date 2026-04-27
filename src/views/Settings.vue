@@ -178,11 +178,38 @@ function handleImport() {
       const text = await file.text()
       const data = JSON.parse(text)
       showLoadingToast({ message: '导入中...', forbidClick: true })
+      // 调试输出
+      const counts = {
+        ledgers: (data.ledgers || []).length,
+        records: (data.records || []).length,
+        gameRecords: (data.gameRecords || []).length,
+        persons: (data.persons || []).length,
+        accounts: (data.accounts || []).length,
+        balanceRecords: (data.balanceRecords || []).length,
+        ledgerCategories: Object.keys(data.ledgerCategories || {}).length,
+        configKeys: Object.keys(data.config || {}).length,
+      }
+      console.log('[Import] 导入内容统计：', counts)
       await importAllData(data)
       closeToast()
-      showToast('导入成功，请刷新页面')
-    } catch {
-      showToast('导入失败，文件格式不正确')
+      showDialog({
+        title: '导入完成',
+        message:
+          `账本：${counts.ledgers}\n` +
+          `账本记录：${counts.records}\n` +
+          `游戏记录(老)：${counts.gameRecords}\n` +
+          `账户：${counts.accounts}\n` +
+          `分类树：${counts.ledgerCategories}\n` +
+          `余额记录：${counts.balanceRecords}\n\n` +
+          `点确认后会刷新页面以加载新数据。`,
+        messageAlign: 'left',
+      }).then(() => {
+        window.location.reload()
+      })
+    } catch (err) {
+      closeToast()
+      showToast('导入失败：' + (err?.message || '文件格式不正确'))
+      console.error('[Import] 失败', err)
     }
   }
   input.click()
