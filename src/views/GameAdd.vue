@@ -1,13 +1,16 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   getLedgers, getCurrentLedgerId, setCurrentLedgerId,
-  getCategories, addRecord,
+  getCategories, getRecordsByLedger, addRecord, updateRecord,
 } from '../utils/db'
 import { showToast } from 'vant'
 
+const route = useRoute()
 const router = useRouter()
+const editId = computed(() => route.params.recordId || '')
+const isEdit = computed(() => Boolean(editId.value))
 
 const ledgers = ref([])
 const ledgerId = ref('')
@@ -26,7 +29,6 @@ const showCat2Picker = ref(false)
 const showDatePicker = ref(false)
 
 const currentLedger = computed(() => ledgers.value.find((l) => l.id === ledgerId.value))
-
 const directionList = computed(() => categories.value[direction.value] || [])
 const cat1 = computed(() => directionList.value.find((c) => c.id === cat1Id.value))
 const cat2List = computed(() => cat1.value?.sub || [])
@@ -34,19 +36,48 @@ const cat2 = computed(() => cat2List.value.find((c) => c.id === cat2Id.value))
 
 onMounted(async () => {
   ledgers.value = await getLedgers()
+
+  if (isEdit.value) {
+    const record = await findRecord(editId.value)
+    if (!record) {
+      showToast('记录不存在')
+      router.back()
+      return
+    }
+    ledgerId.value = record.ledgerId
+    direction.value = record.direction || 'expense'
+    await loadCategories(false)
+    cat1Id.value = record.category1 || ''
+    cat2Id.value = record.category2 || ''
+    amount.value = String(record.amount || '')
+    note.value = record.note || ''
+    recordDate.value = new Date(record.createdAt || Date.now())
+    return
+  }
+
   ledgerId.value = await getCurrentLedgerId()
   if (!ledgers.value.some((l) => l.id === ledgerId.value)) {
     ledgerId.value = ledgers.value[0]?.id || ''
   }
-  await loadCategories()
+  await loadCategories(true)
 })
 
-async function loadCategories() {
+async function findRecord(id) {
+  for (const ledger of ledgers.value) {
+    const list = await getRecordsByLedger(ledger.id)
+    const record = list.find((item) => item.id === id)
+    if (record) return record
+  }
+  return null
+}
+
+async function loadCategories(selectFirst = true) {
   if (!ledgerId.value) return
   categories.value = await getCategories(ledgerId.value)
-  // 默认选第一个分类
-  cat1Id.value = directionList.value[0]?.id || ''
-  cat2Id.value = ''
+  if (selectFirst) {
+    cat1Id.value = directionList.value[0]?.id || ''
+    cat2Id.value = ''
+  }
 }
 
 function onDirectionChange() {
@@ -57,7 +88,7 @@ function onDirectionChange() {
 async function onLedgerConfirm({ selectedOptions }) {
   ledgerId.value = selectedOptions[0].value
   await setCurrentLedgerId(ledgerId.value)
-  await loadCategories()
+  await loadCategories(true)
   showLedgerPicker.value = false
 }
 
@@ -97,6 +128,7 @@ async function onSubmit() {
     showToast('请选择一级分类')
     return
   }
+
   const record = {
     ledgerId: ledgerId.value,
     direction: direction.value,
@@ -108,14 +140,20 @@ async function onSubmit() {
     note: note.value.trim(),
     createdAt: recordDate.value.getTime(),
   }
-  await addRecord(record)
-  showToast('记录成功')
+
+  if (isEdit.value) {
+    await updateRecord(editId.value, record)
+    showToast('已保存修改')
+  } else {
+    await addRecord(record)
+    showToast('记录成功')
+  }
   router.back()
 }
 </script>
 
 <template>
-  <van-nav-bar title="记一笔" left-text="返回" left-arrow @click-left="router.back()" />
+  <van-nav-bar :title="isEdit ? '编辑记录' : '记一笔'" left-text="返回" left-arrow @click-left="router.back()" />
   <div class="page-container">
     <van-form @submit="onSubmit">
       <van-cell-group inset title="记账信息">

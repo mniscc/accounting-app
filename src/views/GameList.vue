@@ -1,14 +1,13 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  getLedgers, addLedger, updateLedger, deleteLedger,
+  getLedgers, addLedger,
   getRecordsByLedger, deleteRecord,
   getCurrentLedgerId, setCurrentLedgerId,
-  getCategories,
 } from '../utils/db'
 import { formatAmount, formatDate } from '../utils/format'
-import { showConfirmDialog, showToast, showDialog } from 'vant'
+import { showConfirmDialog, showToast } from 'vant'
 
 const router = useRouter()
 
@@ -36,7 +35,10 @@ async function loadAll() {
 }
 
 async function loadRecords() {
-  if (!currentLedgerId.value) { records.value = []; return }
+  if (!currentLedgerId.value) {
+    records.value = []
+    return
+  }
   records.value = await getRecordsByLedger(currentLedgerId.value)
 }
 
@@ -62,8 +64,14 @@ async function switchLedger(id) {
 
 async function handleAddLedger() {
   const name = newLedgerName.value.trim()
-  if (!name) { showToast('请输入账本名称'); return }
-  if (ledgers.value.some((l) => l.name === name)) { showToast('已存在同名账本'); return }
+  if (!name) {
+    showToast('请输入账本名称')
+    return
+  }
+  if (ledgers.value.some((l) => l.name === name)) {
+    showToast('已存在同名账本')
+    return
+  }
   const created = await addLedger(name)
   newLedgerName.value = ''
   showAddLedger.value = false
@@ -72,9 +80,13 @@ async function handleAddLedger() {
   showToast('账本已创建，可在设置里编辑分类')
 }
 
+function handleEdit(record) {
+  router.push(`/game/edit/${record.id}`)
+}
+
 async function handleDelete(record) {
   try {
-    await showConfirmDialog({ title: '确认删除', message: `删除这条记录？` })
+    await showConfirmDialog({ title: '确认删除', message: '删除这条记录？' })
     await deleteRecord(record.id)
     showToast('已删除')
     await loadRecords()
@@ -91,7 +103,6 @@ function categoryLabel(record) {
 
 <template>
   <div class="page-container">
-    <!-- 账本切换条 -->
     <div class="ledger-bar" @click="showLedgerSheet = true">
       <div class="ledger-name">
         <van-icon :name="currentLedger?.icon || 'balance-o'" size="18" />
@@ -142,15 +153,19 @@ function categoryLabel(record) {
             {{ record.direction === 'income' ? '+' : '-' }}{{ formatAmount(record.amount) }}
           </div>
           <div v-if="record.note" class="record-note">{{ record.note }}</div>
+          <div class="record-actions">
+            <van-button size="small" plain type="primary" icon="edit" @click.stop="handleEdit(record)">编辑</van-button>
+            <van-button size="small" plain type="danger" icon="delete-o" @click.stop="handleDelete(record)">删除</van-button>
+          </div>
         </div>
         <template #right>
+          <van-button square type="primary" text="编辑" style="height: 100%;" @click="handleEdit(record)" />
           <van-button square type="danger" text="删除" style="height: 100%;" @click="handleDelete(record)" />
         </template>
       </van-swipe-cell>
     </div>
   </div>
 
-  <!-- 账本切换弹层 -->
   <van-action-sheet v-model:show="showLedgerSheet" title="切换账本" cancel-text="取消" close-on-click-action>
     <div class="ledger-list">
       <div v-for="l in ledgers" :key="l.id" class="ledger-item" :class="{active: l.id === currentLedgerId}" @click="switchLedger(l.id)">
@@ -181,6 +196,7 @@ function categoryLabel(record) {
 .record-date { font-size: 13px; color: #969799; }
 .record-amount { font-size: 22px; font-weight: bold; }
 .record-note { font-size: 13px; color: #969799; margin-top: 4px; }
+.record-actions { display: flex; gap: 8px; margin-top: 10px; }
 .small { font-size: 12px; }
 .text-muted { color: #969799; }
 .ledger-bar {
@@ -198,8 +214,11 @@ function categoryLabel(record) {
 .ledger-hint { opacity: .8; }
 .ledger-list { padding: 8px 0; }
 .ledger-item {
-  display: flex; align-items: center; gap: 12px;
-  padding: 14px 20px; cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  cursor: pointer;
   border-bottom: 1px solid #ebedf0;
 }
 .ledger-item:last-child { border-bottom: none; }

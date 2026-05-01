@@ -1,8 +1,11 @@
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { getPersons, addPerson, deletePerson, getAllAccounts, initDefaultPersons } from '../utils/db'
-import { formatAmount, formatDate, getAccountTypeLabel, ACCOUNT_TYPES } from '../utils/format'
+import {
+  getPersons, addPerson, updatePerson, deletePerson,
+  getAllAccounts, updateAccount, initDefaultPersons,
+} from '../utils/db'
+import { formatAmount, formatDate, getAccountTypeLabel } from '../utils/format'
 import { showConfirmDialog, showToast } from 'vant'
 import * as echarts from 'echarts'
 
@@ -11,11 +14,15 @@ const persons = ref([])
 const accounts = ref([])
 const loading = ref(true)
 const showAddPerson = ref(false)
+const showEditPerson = ref(false)
 const newPersonName = ref('')
+const editingPerson = ref(null)
+const editingPersonName = ref('')
 const pieChartRef = ref(null)
 const barChartRef = ref(null)
+let pieChart = null
+let barChart = null
 
-// 类型明细弹窗
 const showTypeDetail = ref(false)
 const selectedTypeName = ref('')
 const selectedTypeAccounts = ref([])
@@ -23,6 +30,7 @@ const selectedTypeAccounts = ref([])
 async function loadData() {
   loading.value = true
   await initDefaultPersons()
+  await repairDuplicatePersons()
   persons.value = await getPersons()
   accounts.value = await getAllAccounts()
   loading.value = false
@@ -32,6 +40,35 @@ async function loadData() {
 }
 
 onMounted(loadData)
+
+async function repairDuplicatePersons() {
+  const list = await getPersons()
+  const allAccounts = await getAllAccounts()
+  const map = new Map()
+
+  for (const person of list) {
+    const name = String(person.name || '').trim()
+    if (!name) continue
+    const group = map.get(name) || []
+    group.push(person)
+    map.set(name, group)
+  }
+
+  for (const group of map.values()) {
+    if (group.length < 2) continue
+    const sorted = [...group].sort((a, b) => (a.order || 0) - (b.order || 0))
+    const keep = sorted[0]
+    const duplicates = sorted.slice(1)
+
+    for (const duplicate of duplicates) {
+      const duplicateAccounts = allAccounts.filter((account) => account.personId === duplicate.id)
+      for (const account of duplicateAccounts) {
+        await updateAccount(account.id, { personId: keep.id })
+      }
+      await deletePerson(duplicate.id)
+    }
+  }
+}
 
 function getPersonAccounts(personId) {
   return accounts.value.filter((a) => a.personId === personId)
@@ -47,7 +84,6 @@ function getPersonName(personId) {
 
 const grandTotal = computed(() => accounts.value.reduce((sum, a) => sum + (a.balance || 0), 0))
 
-// 按类型汇总
 const typeStats = computed(() => {
   const map = {}
   for (const a of accounts.value) {
@@ -68,14 +104,17 @@ function showTypeAccounts(typeLabel) {
 }
 
 function renderPieChart() {
-  if (!pieChartRef.value || accounts.value.length === 0) return
+  if (!pieChartRef.value) return
   const data = typeStats.value
     .filter((t) => t.total > 0)
     .map((t) => ({ name: t.label, value: t.total }))
 
-  if (data.length === 0) return
-  const chart = echarts.init(pieChartRef.value)
-  chart.setOption({
+  if (data.length === 0) {
+    if (pieChart) pieChart.clear()
+    return
+  }
+  if (!pieChart) pieChart = echarts.init(pieChartRef.value)
+  pieChart.setOption({
     series: [{
       type: 'pie',
       radius: ['40%', '70%'],
@@ -83,21 +122,23 @@ function renderPieChart() {
       label: { formatter: '{b}\n{d}%' },
     }],
   })
-  // 点击饼图扇区，弹出明细
-  chart.off('click')
-  chart.on('click', (params) => {
+  pieChart.off('click')
+  pieChart.on('click', (params) => {
     showTypeAccounts(params.name)
   })
 }
 
 function renderBarChart() {
-  if (!barChartRef.value || persons.value.length === 0) return
+  if (!barChartRef.value) return
   const names = persons.value.map((p) => p.name)
   const totals = persons.value.map((p) => getPersonTotal(p.id))
 
-  if (totals.every((t) => t === 0)) return
-  const chart = echarts.init(barChartRef.value)
-  chart.setOption({
+  if (persons.value.length === 0 || totals.every((t) => t === 0)) {
+    if (barChart) barChart.clear()
+    return
+  }
+  if (!barChart) barChart = echarts.init(barChartRef.value)
+  barChart.setOption({
     grid: { left: 60, right: 20, top: 20, bottom: 30 },
     xAxis: { type: 'category', data: names },
     yAxis: { type: 'value' },
@@ -114,10 +155,41 @@ function renderBarChart() {
 
 async function handleAddPerson() {
   const name = newPersonName.value.trim()
-  if (!name) { showToast('请输入姓名'); return }
+  if (!name) {
+    showToast('请输入姓名')
+    return
+  }
+  if (persons.value.some((person) => person.name === name)) {
+    showToast('已存在同名成员')
+    return
+  }
   await addPerson(name)
   newPersonName.value = ''
   showAddPerson.value = false
+  await loadData()
+}
+
+function openEditPerson(person) {
+  editingPerson.value = person
+  editingPersonName.value = person.name
+  showEditPerson.value = true
+}
+
+async function handleEditPerson() {
+  const name = editingPersonName.value.trim()
+  if (!name) {
+    showToast('请输入姓名')
+    return
+  }
+  if (persons.value.some((person) => person.id !== editingPerson.value?.id && person.name === name)) {
+    showToast('已存在同名成员')
+    return
+  }
+  await updatePerson(editingPerson.value.id, { name })
+  showEditPerson.value = false
+  editingPerson.value = null
+  editingPersonName.value = ''
+  showToast('已保存')
   await loadData()
 }
 
@@ -125,7 +197,7 @@ async function handleDeletePerson(person) {
   try {
     await showConfirmDialog({
       title: '确认删除',
-      message: `删除"${person.name}"及其所有账户数据？此操作不可恢复。`,
+      message: `删除“${person.name}”及其所有账户数据？此操作不可恢复。`,
     })
     await deletePerson(person.id)
     showToast('已删除')
@@ -144,13 +216,11 @@ async function handleDeletePerson(person) {
     <van-loading v-if="loading" style="text-align: center; padding: 40px;" />
 
     <template v-else>
-      <!-- 资产分布饼图 -->
       <div v-if="accounts.length > 0" class="section-card">
         <div class="chart-title">资产类型分布（点击查看明细）</div>
         <div ref="pieChartRef" style="width: 100%; height: 220px;"></div>
       </div>
 
-      <!-- 类型汇总列表 -->
       <div v-if="typeStats.length > 0" class="section-card">
         <div class="chart-title">分类汇总</div>
         <div v-for="stat in typeStats" :key="stat.label" class="type-row" @click="showTypeAccounts(stat.label)">
@@ -161,35 +231,40 @@ async function handleDeletePerson(person) {
         </div>
       </div>
 
-      <!-- 成员资产对比柱状图 -->
       <div v-if="persons.length > 0" class="section-card">
         <div class="chart-title">成员资产对比</div>
         <div ref="barChartRef" style="width: 100%; height: 200px;"></div>
       </div>
 
-      <!-- 人员列表 -->
       <van-swipe-cell v-for="person in persons" :key="person.id">
-        <div class="section-card person-card" @click="router.push(`/assets/account/${person.id}`)">
-          <div class="person-header">
-            <span class="person-name">{{ person.name }}</span>
-            <span class="person-total">{{ formatAmount(getPersonTotal(person.id)) }}</span>
+        <div class="section-card person-card">
+          <div class="person-main" @click="router.push(`/assets/account/${person.id}`)">
+            <div class="person-header">
+              <span class="person-name">{{ person.name }}</span>
+              <span class="person-total">{{ formatAmount(getPersonTotal(person.id)) }}</span>
+            </div>
+            <div class="account-tags">
+              <van-tag
+                v-for="acc in getPersonAccounts(person.id)"
+                :key="acc.id"
+                plain
+                size="medium"
+                style="margin: 2px 4px 2px 0;"
+              >
+                {{ acc.name }} {{ formatAmount(acc.balance || 0) }}
+              </van-tag>
+              <van-tag v-if="getPersonAccounts(person.id).length === 0" plain type="default" size="medium">
+                暂无账户，点击添加
+              </van-tag>
+            </div>
           </div>
-          <div class="account-tags">
-            <van-tag
-              v-for="acc in getPersonAccounts(person.id)"
-              :key="acc.id"
-              plain
-              size="medium"
-              style="margin: 2px 4px 2px 0;"
-            >
-              {{ acc.name }} {{ formatAmount(acc.balance || 0) }}
-            </van-tag>
-            <van-tag v-if="getPersonAccounts(person.id).length === 0" plain type="default" size="medium">
-              暂无账户，点击添加
-            </van-tag>
+          <div class="person-actions">
+            <van-button size="small" plain type="primary" icon="edit" @click.stop="openEditPerson(person)">编辑</van-button>
+            <van-button size="small" plain type="danger" icon="delete-o" @click.stop="handleDeletePerson(person)">删除</van-button>
           </div>
         </div>
         <template #right>
+          <van-button square type="primary" text="编辑" style="height: 100%;" @click="openEditPerson(person)" />
           <van-button square type="danger" text="删除" style="height: 100%;" @click="handleDeletePerson(person)" />
         </template>
       </van-swipe-cell>
@@ -200,12 +275,14 @@ async function handleDeletePerson(person) {
     </template>
   </div>
 
-  <!-- 添加成员弹窗 -->
   <van-dialog v-model:show="showAddPerson" title="添加成员" show-cancel-button @confirm="handleAddPerson">
     <van-field v-model="newPersonName" placeholder="请输入姓名" style="margin: 16px;" />
   </van-dialog>
 
-  <!-- 类型明细弹窗 -->
+  <van-dialog v-model:show="showEditPerson" title="编辑成员" show-cancel-button @confirm="handleEditPerson">
+    <van-field v-model="editingPersonName" placeholder="请输入姓名" style="margin: 16px;" />
+  </van-dialog>
+
   <van-popup v-model:show="showTypeDetail" position="bottom" round style="max-height: 70%;">
     <div style="padding: 16px;">
       <div style="font-size: 17px; font-weight: bold; margin-bottom: 4px;">{{ selectedTypeName }}</div>
@@ -239,9 +316,11 @@ async function handleDeletePerson(person) {
 .summary-amount { font-size: 32px; font-weight: bold; }
 .chart-title { font-size: 15px; font-weight: bold; margin-bottom: 8px; }
 .person-card { cursor: pointer; }
+.person-main { cursor: pointer; }
 .person-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .person-name { font-size: 17px; font-weight: bold; }
 .person-total { font-size: 17px; font-weight: bold; color: #07c160; }
+.person-actions { display: flex; gap: 8px; margin-top: 10px; }
 .account-tags { margin-top: 4px; }
 .type-row {
   display: flex;

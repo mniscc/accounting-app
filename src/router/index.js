@@ -16,6 +16,11 @@ const routes = [
     component: () => import('../views/GameAdd.vue'),
   },
   {
+    path: '/game/edit/:recordId',
+    name: 'GameEdit',
+    component: () => import('../views/GameAdd.vue'),
+  },
+  {
     path: '/game/stats',
     name: 'GameStats',
     component: () => import('../views/GameStats.vue'),
